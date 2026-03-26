@@ -210,10 +210,17 @@ async def parse_bet(ix, arg):
 async def chk_bet(ix, bet):
     async def err(msg):
         e = discord.Embed(description=f"\u274c {msg}", color=C_RED)
-        try:    await ix.followup.send(embed=e, ephemeral=True)
-        except: await ix.response.send_message(embed=e, ephemeral=True)
+        try:
+            if ix.response.is_done():
+                await ix.followup.send(embed=e, ephemeral=True)
+            else:
+                await ix.response.send_message(embed=e, ephemeral=True)
+        except Exception as _ce:
+            log.warning(f"chk_bet err send failed: {_ce}")
     if not bet or bet <= 0:
         await err("Enter a valid bet — e.g. `1000`, `5k`, `2m`, `all`"); return False
+    if bet < 1:
+        await err("Minimum bet is 1."); return False
     bl = await db.bal(ix.guild_id, ix.user.id)
     if bet > bl:
         await err(f"You only have {CE} **{fm(bl)} {CUR}**."); return False
@@ -285,45 +292,64 @@ def wl_check():
 @bot.tree.command(name="daily", description="Claim 1\u201320M Shillings every 3 hours")
 async def cmd_daily(ix: discord.Interaction):
     await ix.response.defer()
-    gid, uid = ix.guild_id, ix.user.id
-    last = await db.last_claim(gid, uid)
-    now  = datetime.now(timezone.utc)
-    if last:
-        t   = last if last.tzinfo else last.replace(tzinfo=timezone.utc)
-        rem = CLAIM_CD - (now - t).total_seconds()
-        if rem > 0:
-            e = discord.Embed(title="\u23f3  On Cooldown",
-                              description=f"Next claim in **{fmt_cd(rem)}**", color=C_GOLD)
-            return await ix.followup.send(embed=e)
-    amt = roll_claim()
-    await db.adj(gid, uid, amt); await db.touch_claim(gid, uid)
-    bal = await db.bal(gid, uid)
-    e = discord.Embed(title=f"{CE}  Daily Claim", color=C_GREEN)
-    e.description = f"{rarity_label(amt)}\n\nYou claimed {CE} **{fm(amt)} {CUR}**!"
-    e.set_thumbnail(url=ix.user.display_avatar.url)
-    e.set_footer(text=f"Balance: {CE} {fm(bal)}  \u00b7  Next in 3h")
-    await ix.followup.send(embed=e)
-
+    try:
+        gid, uid = ix.guild_id, ix.user.id
+        last = await db.last_claim(gid, uid)
+        now  = datetime.now(timezone.utc)
+        if last:
+            t   = last if last.tzinfo else last.replace(tzinfo=timezone.utc)
+            rem = CLAIM_CD - (now - t).total_seconds()
+            if rem > 0:
+                e = discord.Embed(title="\u23f3  On Cooldown",
+                                  description=f"Next claim in **{fmt_cd(rem)}**", color=C_GOLD)
+                return await ix.followup.send(embed=e)
+        amt = roll_claim()
+        await db.adj(gid, uid, amt); await db.touch_claim(gid, uid)
+        bal = await db.bal(gid, uid)
+        e = discord.Embed(title=f"{CE}  Daily Claim", color=C_GREEN)
+        e.description = f"{rarity_label(amt)}\n\nYou claimed {CE} **{fm(amt)} {CUR}**!"
+        e.set_thumbnail(url=ix.user.display_avatar.url)
+        e.set_footer(text=f"Balance: {CE} {fm(bal)}  \u00b7  Next in 3h")
+        await ix.followup.send(embed=e)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 @bot.tree.command(name="balance", description="Check your or someone else's balance")
 @app_commands.describe(member="User to check (leave empty for yourself)")
 async def cmd_balance(ix: discord.Interaction, member: discord.Member = None):
     await ix.response.defer()
-    m   = member or ix.user
-    bal = await db.bal(ix.guild_id, m.id)
-    wr  = await db.wager_req(ix.guild_id, m.id)
-    e   = discord.Embed(color=C_BLUE)
-    e.set_author(name=m.display_name, icon_url=m.display_avatar.url)
-    e.set_thumbnail(url=m.display_avatar.url)
-    e.add_field(name="\U0001f4b0 Balance", value=f"{CE} **{fm(bal)} {CUR}**", inline=False)
-    if wr > 0:
-        pct = max(0, min(100, int((1 - wr / max(bal, 1)) * 100)))
-        bar = "\u2588" * (pct // 10) + "\u2591" * (10 - pct // 10)
-        e.add_field(name="\u26a0\ufe0f Wager Requirement",
-                    value=f"Must wager {CE} **{fm(wr)}** more\n`{bar}` {pct}%", inline=False)
-    else:
-        e.add_field(name="\u2705 Status", value="No wager requirement!", inline=False)
-    await ix.followup.send(embed=e)
+    try:
+        m   = member or ix.user
+        bal = await db.bal(ix.guild_id, m.id)
+        wr  = await db.wager_req(ix.guild_id, m.id)
+        e   = discord.Embed(color=C_BLUE)
+        e.set_author(name=m.display_name, icon_url=m.display_avatar.url)
+        e.set_thumbnail(url=m.display_avatar.url)
+        e.add_field(name="\U0001f4b0 Balance", value=f"{CE} **{fm(bal)} {CUR}**", inline=False)
+        if wr > 0:
+            pct = max(0, min(100, int((1 - wr / max(bal, 1)) * 100)))
+            bar = "\u2588" * (pct // 10) + "\u2591" * (10 - pct // 10)
+            e.add_field(name="\u26a0\ufe0f Wager Requirement",
+                        value=f"Must wager {CE} **{fm(wr)}** more\n`{bar}` {pct}%", inline=False)
+        else:
+            e.add_field(name="\u2705 Status", value="No wager requirement!", inline=False)
+        await ix.followup.send(embed=e)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # COINFLIP
@@ -337,18 +363,28 @@ async def cmd_balance(ix: discord.Interaction, member: discord.Member = None):
 ])
 async def cmd_cf(ix: discord.Interaction, bet: str, side: str):
     await ix.response.defer()
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    result = fair_flip()
-    coin   = "\U0001fa99 Heads" if result == "heads" else "\U0001f7eb Tails"
-    gid, uid = ix.guild_id, ix.user.id
-    await db.reduce_wager(gid, uid, amt)
-    if result == side:
-        await db.adj(gid, uid, amt); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_win("Coinflip", f"{coin}\nYou called **{side}** \u2014 nailed it!", amt, bal))
-    else:
-        await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_lose("Coinflip", f"{coin}\nYou called **{side}** \u2014 wrong call.", amt, bal))
+    try:
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        result = fair_flip()
+        coin   = "\U0001fa99 Heads" if result == "heads" else "\U0001f7eb Tails"
+        gid, uid = ix.guild_id, ix.user.id
+        await db.reduce_wager(gid, uid, amt)
+        if result == side:
+            await db.adj(gid, uid, amt); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_win("Coinflip", f"{coin}\nYou called **{side}** \u2014 nailed it!", amt, bal))
+        else:
+            await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_lose("Coinflip", f"{coin}\nYou called **{side}** \u2014 wrong call.", amt, bal))
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SLOTS
@@ -363,22 +399,32 @@ SLOT_PAY = {"7\ufe0f\u20e3": 50, "\U0001f48e": 20, "\U0001f347": 10,
 @app_commands.describe(bet="Amount to bet")
 async def cmd_slots(ix: discord.Interaction, bet: str):
     await ix.response.defer()
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    reels = [random.choices(SLOT_SYM, weights=SLOT_W, k=1)[0] for _ in range(3)]
-    row   = " \u2502 ".join(reels)
-    gid, uid = ix.guild_id, ix.user.id
-    await db.reduce_wager(gid, uid, amt)
-    if reels[0] == reels[1] == reels[2]:
-        mult = SLOT_PAY[reels[0]]; win = amt * mult - amt
-        await db.adj(gid, uid, win); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_win("Slots \U0001f3b0", f"\u27e3 {row} \u27e2\n**JACKPOT! {mult}x**", win, bal))
-    elif reels[0] == reels[1] or reels[1] == reels[2]:
-        bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_tie("Slots \U0001f3b0", f"\u27e3 {row} \u27e2\n2 of a kind \u2014 bet returned", bal))
-    else:
-        await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_lose("Slots \U0001f3b0", f"\u27e3 {row} \u27e2\nNo match.", amt, bal))
+    try:
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        reels = [random.choices(SLOT_SYM, weights=SLOT_W, k=1)[0] for _ in range(3)]
+        row   = " \u2502 ".join(reels)
+        gid, uid = ix.guild_id, ix.user.id
+        await db.reduce_wager(gid, uid, amt)
+        if reels[0] == reels[1] == reels[2]:
+            mult = SLOT_PAY[reels[0]]; win = amt * mult - amt
+            await db.adj(gid, uid, win); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_win("Slots \U0001f3b0", f"\u27e3 {row} \u27e2\n**JACKPOT! {mult}x**", win, bal))
+        elif reels[0] == reels[1] or reels[1] == reels[2]:
+            bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_tie("Slots \U0001f3b0", f"\u27e3 {row} \u27e2\n2 of a kind \u2014 bet returned", bal))
+        else:
+            await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_lose("Slots \U0001f3b0", f"\u27e3 {row} \u27e2\nNo match.", amt, bal))
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ROULETTE
@@ -390,37 +436,47 @@ RL_RED = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
 @app_commands.describe(bet="Amount to bet", choice="red/black/odd/even/1-12/13-24/25-36 or a number 0\u201336")
 async def cmd_roulette(ix: discord.Interaction, bet: str, choice: str):
     await ix.response.defer()
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    spin = fair_int(0, 36)
-    c    = choice.lower().strip()
-    clr  = "\U0001f7e5" if spin in RL_RED else ("\u2b1b" if spin > 0 else "\U0001f7e9")
-    gid, uid = ix.guild_id, ix.user.id
-    won, mult = False, 0
-    if   c == "red":              won, mult = spin in RL_RED, 2
-    elif c == "black":            won, mult = (spin not in RL_RED and spin > 0), 2
-    elif c == "odd":              won, mult = (spin > 0 and spin % 2 == 1), 2
-    elif c == "even":             won, mult = (spin > 0 and spin % 2 == 0), 2
-    elif c in ("1-12","first"):   won, mult = (1 <= spin <= 12), 3
-    elif c in ("13-24","second"): won, mult = (13 <= spin <= 24), 3
-    elif c in ("25-36","third"):  won, mult = (25 <= spin <= 36), 3
-    else:
+    try:
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        spin = fair_int(0, 36)
+        c    = choice.lower().strip()
+        clr  = "\U0001f7e5" if spin in RL_RED else ("\u2b1b" if spin > 0 else "\U0001f7e9")
+        gid, uid = ix.guild_id, ix.user.id
+        won, mult = False, 0
+        if   c == "red":              won, mult = spin in RL_RED, 2
+        elif c == "black":            won, mult = (spin not in RL_RED and spin > 0), 2
+        elif c == "odd":              won, mult = (spin > 0 and spin % 2 == 1), 2
+        elif c == "even":             won, mult = (spin > 0 and spin % 2 == 0), 2
+        elif c in ("1-12","first"):   won, mult = (1 <= spin <= 12), 3
+        elif c in ("13-24","second"): won, mult = (13 <= spin <= 24), 3
+        elif c in ("25-36","third"):  won, mult = (25 <= spin <= 36), 3
+        else:
+            try:
+                n = int(c)
+                if 0 <= n <= 36: won, mult = spin == n, 36
+                else: return await ix.followup.send(
+                    embed=discord.Embed(description="\u274c Number must be 0\u201336.", color=C_RED), ephemeral=True)
+            except ValueError:
+                return await ix.followup.send(
+                    embed=discord.Embed(description="\u274c Invalid choice. Use red/black/odd/even/1-12/13-24/25-36 or 0\u201336.", color=C_RED), ephemeral=True)
+        detail = f"Ball landed on {clr} **{spin}** \u2014 you bet **{choice}**"
+        await db.reduce_wager(gid, uid, amt)
+        if won:
+            win = amt * (mult - 1); await db.adj(gid, uid, win); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_win("Roulette \U0001f3a1", f"{detail} \u2014 **{mult}x!**", win, bal))
+        else:
+            await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_lose("Roulette \U0001f3a1", detail, amt, bal))
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
         try:
-            n = int(c)
-            if 0 <= n <= 36: won, mult = spin == n, 36
-            else: return await ix.followup.send(
-                embed=discord.Embed(description="\u274c Number must be 0\u201336.", color=C_RED), ephemeral=True)
-        except ValueError:
-            return await ix.followup.send(
-                embed=discord.Embed(description="\u274c Invalid choice. Use red/black/odd/even/1-12/13-24/25-36 or 0\u201336.", color=C_RED), ephemeral=True)
-    detail = f"Ball landed on {clr} **{spin}** \u2014 you bet **{choice}**"
-    await db.reduce_wager(gid, uid, amt)
-    if won:
-        win = amt * (mult - 1); await db.adj(gid, uid, win); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_win("Roulette \U0001f3a1", f"{detail} \u2014 **{mult}x!**", win, bal))
-    else:
-        await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_lose("Roulette \U0001f3a1", detail, amt, bal))
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BLACKJACK
@@ -508,17 +564,27 @@ class BjView(View):
 @app_commands.describe(bet="Amount to bet")
 async def cmd_bj(ix: discord.Interaction, bet: str):
     await ix.response.defer()
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    deck = mk_deck(); ph = [deck.pop(), deck.pop()]; dh = [deck.pop(), deck.pop()]
-    if hand_val(ph) == 21:
-        win = int(amt * 1.5)
-        await db.adj(ix.guild_id, ix.user.id, win)
-        await db.reduce_wager(ix.guild_id, ix.user.id, amt)
-        bal = await db.bal(ix.guild_id, ix.user.id)
-        return await ix.followup.send(embed=e_win("Blackjack", f"\U0001f31f Natural 21! You: {' '.join(ph)}", win, bal))
-    v = BjView(ix.user.id, ix.guild_id, deck, ph, dh, amt)
-    v.msg = await ix.followup.send(embed=v._embed(), view=v)
+    try:
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        deck = mk_deck(); ph = [deck.pop(), deck.pop()]; dh = [deck.pop(), deck.pop()]
+        if hand_val(ph) == 21:
+            win = int(amt * 1.5)
+            await db.adj(ix.guild_id, ix.user.id, win)
+            await db.reduce_wager(ix.guild_id, ix.user.id, amt)
+            bal = await db.bal(ix.guild_id, ix.user.id)
+            return await ix.followup.send(embed=e_win("Blackjack", f"\U0001f31f Natural 21! You: {' '.join(ph)}", win, bal))
+        v = BjView(ix.user.id, ix.guild_id, deck, ph, dh, amt)
+        v.msg = await ix.followup.send(embed=v._embed(), view=v)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LIMBO
@@ -528,24 +594,34 @@ async def cmd_bj(ix: discord.Interaction, bet: str):
 @app_commands.describe(bet="Amount to bet", target="Target multiplier e.g. 2.5")
 async def cmd_limbo(ix: discord.Interaction, bet: str, target: str):
     await ix.response.defer()
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    try: tgt = float(target)
-    except:
-        return await ix.followup.send(embed=discord.Embed(description="\u274c Target must be a number.", color=C_RED), ephemeral=True)
-    if tgt < 1.01 or tgt > 1_000_000:
-        return await ix.followup.send(embed=discord.Embed(description="\u274c Target must be between 1.01 and 1,000,000.", color=C_RED), ephemeral=True)
-    result = gen_mult(); chance = round(96 / tgt, 2)
-    gid, uid = ix.guild_id, ix.user.id
-    await db.reduce_wager(gid, uid, amt)
-    if result >= tgt:
-        win = int(amt * tgt) - amt; await db.adj(gid, uid, win); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_win("Limbo \U0001f3af",
-            f"Result: **{result:.2f}x** \u2265 target **{tgt:.2f}x**\nWin chance: {chance:.1f}%", win, bal))
-    else:
-        await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_lose("Limbo \U0001f3af",
-            f"Result: **{result:.2f}x** < target **{tgt:.2f}x**\nWin chance: {chance:.1f}%", amt, bal))
+    try:
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        try: tgt = float(target)
+        except:
+            return await ix.followup.send(embed=discord.Embed(description="\u274c Target must be a number.", color=C_RED), ephemeral=True)
+        if tgt < 1.01 or tgt > 1_000_000:
+            return await ix.followup.send(embed=discord.Embed(description="\u274c Target must be between 1.01 and 1,000,000.", color=C_RED), ephemeral=True)
+        result = gen_mult(); chance = round(96 / tgt, 2)
+        gid, uid = ix.guild_id, ix.user.id
+        await db.reduce_wager(gid, uid, amt)
+        if result >= tgt:
+            win = int(amt * tgt) - amt; await db.adj(gid, uid, win); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_win("Limbo \U0001f3af",
+                f"Result: **{result:.2f}x** \u2265 target **{tgt:.2f}x**\nWin chance: {chance:.1f}%", win, bal))
+        else:
+            await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_lose("Limbo \U0001f3af",
+                f"Result: **{result:.2f}x** < target **{tgt:.2f}x**\nWin chance: {chance:.1f}%", amt, bal))
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CRASH
@@ -620,11 +696,21 @@ async def _crash_loop(view: CrashView):
 @app_commands.describe(bet="Amount to bet")
 async def cmd_crash(ix: discord.Interaction, bet: str):
     await ix.response.defer()
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    view = CrashView(ix.user.id, ix.guild_id, amt, gen_mult())
-    view.msg  = await ix.followup.send(embed=view._embed(), view=view)
-    view.task = asyncio.create_task(_crash_loop(view))
+    try:
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        view = CrashView(ix.user.id, ix.guild_id, amt, gen_mult())
+        view.msg  = await ix.followup.send(embed=view._embed(), view=view)
+        view.task = asyncio.create_task(_crash_loop(view))
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HIGHER OR LOWER
@@ -709,10 +795,20 @@ class HLView(View):
 @app_commands.describe(bet="Amount to bet")
 async def cmd_hl(ix: discord.Interaction, bet: str):
     await ix.response.defer()
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    v = HLView(ix.user.id, ix.guild_id, amt)
-    v.msg = await ix.followup.send(embed=v._embed(), view=v)
+    try:
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        v = HLView(ix.user.id, ix.guild_id, amt)
+        v.msg = await ix.followup.send(embed=v._embed(), view=v)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MINES
@@ -828,10 +924,20 @@ class MinesView(View):
 ])
 async def cmd_mines(ix: discord.Interaction, bet: str, mines: int = 3):
     await ix.response.defer()
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    v = MinesView(ix.user.id, ix.guild_id, amt, mines)
-    v.msg = await ix.followup.send(embed=v._embed(), view=v)
+    try:
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        v = MinesView(ix.user.id, ix.guild_id, amt, mines)
+        v.msg = await ix.followup.send(embed=v._embed(), view=v)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BOMB DEFUSE
@@ -935,10 +1041,20 @@ class BombView(View):
 @app_commands.describe(bet="Amount to bet")
 async def cmd_bomb(ix: discord.Interaction, bet: str):
     await ix.response.defer()
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    v = BombView(ix.user.id, ix.guild_id, amt)
-    v.msg = await ix.followup.send(embed=v._embed(), view=v)
+    try:
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        v = BombView(ix.user.id, ix.guild_id, amt)
+        v.msg = await ix.followup.send(embed=v._embed(), view=v)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WAR
@@ -951,26 +1067,36 @@ WAR_DECK = [f"{r}{s}" for s in ["\u2660","\u2665","\u2666","\u2663"]
 @app_commands.describe(bet="Amount to bet")
 async def cmd_war(ix: discord.Interaction, bet: str):
     await ix.response.defer()
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    deck = fair_shuffle(WAR_DECK); rounds=[]
-    yc = deck.pop(); dc = deck.pop(); rounds.append((yc, dc))
-    while card_val(yc) == card_val(dc) and len(deck) >= 2:
+    try:
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        deck = fair_shuffle(WAR_DECK); rounds=[]
         yc = deck.pop(); dc = deck.pop(); rounds.append((yc, dc))
-    lines = [("Round 1" if i==0 else f"\u2694\ufe0f War Round {i+1}") +
-             f": You **{y}** vs Dealer **{d}**" for i,(y,d) in enumerate(rounds)]
-    gid, uid = ix.guild_id, ix.user.id
-    await db.reduce_wager(gid, uid, amt)
-    detail = "\n".join(lines)
-    if card_val(yc) > card_val(dc):
-        await db.adj(gid, uid, amt); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_win("War \u2694\ufe0f", detail, amt, bal))
-    elif card_val(yc) < card_val(dc):
-        await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_lose("War \u2694\ufe0f", detail, amt, bal))
-    else:
-        bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_tie("War \u2694\ufe0f", detail+"\nDeck exhausted \u2014 tie!", bal))
+        while card_val(yc) == card_val(dc) and len(deck) >= 2:
+            yc = deck.pop(); dc = deck.pop(); rounds.append((yc, dc))
+        lines = [("Round 1" if i==0 else f"\u2694\ufe0f War Round {i+1}") +
+                 f": You **{y}** vs Dealer **{d}**" for i,(y,d) in enumerate(rounds)]
+        gid, uid = ix.guild_id, ix.user.id
+        await db.reduce_wager(gid, uid, amt)
+        detail = "\n".join(lines)
+        if card_val(yc) > card_val(dc):
+            await db.adj(gid, uid, amt); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_win("War \u2694\ufe0f", detail, amt, bal))
+        elif card_val(yc) < card_val(dc):
+            await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_lose("War \u2694\ufe0f", detail, amt, bal))
+        else:
+            bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_tie("War \u2694\ufe0f", detail+"\nDeck exhausted \u2014 tie!", bal))
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HORSE RACE
@@ -997,22 +1123,32 @@ HORSES = [
 ])
 async def cmd_horse(ix: discord.Interaction, bet: str, horse: int):
     await ix.response.defer()
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    weights = [w for _,_,w in HORSES]
-    winner  = random.choices(range(6), weights=weights, k=1)[0]; chosen = horse - 1
-    cn, co, _ = HORSES[chosen]; wn, _, _ = HORSES[winner]
-    positions = fair_shuffle(list(range(6)))
-    race = "\n".join(("\U0001f3c6" if hi==winner else f"{pos}.") + f" {HORSES[hi][0]}"
-                     for pos, hi in enumerate(positions, 1))
-    gid, uid = ix.guild_id, ix.user.id
-    await db.reduce_wager(gid, uid, amt)
-    if winner == chosen:
-        win = int(amt * (co - 1)); await db.adj(gid, uid, win); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_win("Horse Race \U0001f3c7", f"{race}\n\nYou picked **{cn}** \u2014 winner!", win, bal))
-    else:
-        await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_lose("Horse Race \U0001f3c7", f"{race}\n\nYou picked **{cn}** \u2014 **{wn}** won.", amt, bal))
+    try:
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        weights = [w for _,_,w in HORSES]
+        winner  = random.choices(range(6), weights=weights, k=1)[0]; chosen = horse - 1
+        cn, co, _ = HORSES[chosen]; wn, _, _ = HORSES[winner]
+        positions = fair_shuffle(list(range(6)))
+        race = "\n".join(("\U0001f3c6" if hi==winner else f"{pos}.") + f" {HORSES[hi][0]}"
+                         for pos, hi in enumerate(positions, 1))
+        gid, uid = ix.guild_id, ix.user.id
+        await db.reduce_wager(gid, uid, amt)
+        if winner == chosen:
+            win = int(amt * (co - 1)); await db.adj(gid, uid, win); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_win("Horse Race \U0001f3c7", f"{race}\n\nYou picked **{cn}** \u2014 winner!", win, bal))
+        else:
+            await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_lose("Horse Race \U0001f3c7", f"{race}\n\nYou picked **{cn}** \u2014 **{wn}** won.", amt, bal))
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # NUMBER GUESS
@@ -1022,24 +1158,34 @@ async def cmd_horse(ix: discord.Interaction, bet: str, horse: int):
 @app_commands.describe(bet="Amount to bet", guess="Your guess (1\u2013100)")
 async def cmd_ng(ix: discord.Interaction, bet: str, guess: int):
     await ix.response.defer()
-    if not 1 <= guess <= 100:
-        return await ix.followup.send(embed=discord.Embed(description="\u274c Guess must be 1\u2013100.", color=C_RED), ephemeral=True)
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    result = fair_int(1,100); diff = abs(result - guess)
-    gid, uid = ix.guild_id, ix.user.id
-    await db.reduce_wager(gid, uid, amt)
-    if diff == 0:    mult, lbl = 90, "\U0001f3af **EXACT HIT!**"
-    elif diff <= 3:  mult, lbl = 10, f"\U0001f525 **Within 3!** (off by {diff})"
-    elif diff <= 10: mult, lbl =  3, f"\U0001f321\ufe0f **Within 10!** (off by {diff})"
-    else:            mult, lbl =  0, f"\u274c **Miss!** (off by {diff})"
-    detail = f"Number was **{result}**, you guessed **{guess}**\n{lbl}"
-    if mult > 0:
-        win = amt * (mult - 1); await db.adj(gid, uid, win); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_win("Number Guess \U0001f522", detail, win, bal))
-    else:
-        await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
-        await ix.followup.send(embed=e_lose("Number Guess \U0001f522", detail, amt, bal))
+    try:
+        if not 1 <= guess <= 100:
+            return await ix.followup.send(embed=discord.Embed(description="\u274c Guess must be 1\u2013100.", color=C_RED), ephemeral=True)
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        result = fair_int(1,100); diff = abs(result - guess)
+        gid, uid = ix.guild_id, ix.user.id
+        await db.reduce_wager(gid, uid, amt)
+        if diff == 0:    mult, lbl = 90, "\U0001f3af **EXACT HIT!**"
+        elif diff <= 3:  mult, lbl = 10, f"\U0001f525 **Within 3!** (off by {diff})"
+        elif diff <= 10: mult, lbl =  3, f"\U0001f321\ufe0f **Within 10!** (off by {diff})"
+        else:            mult, lbl =  0, f"\u274c **Miss!** (off by {diff})"
+        detail = f"Number was **{result}**, you guessed **{guess}**\n{lbl}"
+        if mult > 0:
+            win = amt * (mult - 1); await db.adj(gid, uid, win); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_win("Number Guess \U0001f522", detail, win, bal))
+        else:
+            await db.adj(gid, uid, -amt); bal = await db.bal(gid, uid)
+            await ix.followup.send(embed=e_lose("Number Guess \U0001f522", detail, amt, bal))
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SCRATCH CARD
@@ -1134,10 +1280,20 @@ class ScratchView(View):
 @app_commands.describe(bet="Amount to bet")
 async def cmd_scratch(ix: discord.Interaction, bet: str):
     await ix.response.defer()
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    v = ScratchView(ix.user.id, ix.guild_id, amt)
-    v.msg = await ix.followup.send(embed=v._embed(), view=v)
+    try:
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        v = ScratchView(ix.user.id, ix.guild_id, amt)
+        v.msg = await ix.followup.send(embed=v._embed(), view=v)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DUEL (PvP)
@@ -1193,20 +1349,30 @@ class DuelView(View):
 @app_commands.describe(opponent="The user to challenge", bet="Amount each player wagers")
 async def cmd_duel(ix: discord.Interaction, opponent: discord.Member, bet: str):
     await ix.response.defer()
-    if opponent.bot or opponent == ix.user:
-        return await ix.followup.send(embed=discord.Embed(description="\u274c Invalid opponent.", color=C_RED), ephemeral=True)
-    amt = await parse_bet(ix, bet)
-    if not await chk_bet(ix, amt): return
-    ob = await db.bal(ix.guild_id, opponent.id)
-    if amt > ob:
-        return await ix.followup.send(embed=discord.Embed(description=f"\u274c {opponent.mention} doesn't have enough {CE}.", color=C_RED), ephemeral=True)
-    e = discord.Embed(title="\u2694\ufe0f  Duel Challenge", color=C_BLUE)
-    e.description = (f"{ix.user.mention} challenges {opponent.mention}!\n\n"
-                     f"**Bet:** {CE} **{fm(amt)}** each\n"
-                     f"**Winner takes:** {CE} **{fm(amt*2)}**")
-    e.set_footer(text=f"{opponent.display_name} \u2014 you have 60s to respond!")
-    v = DuelView(ix.user, opponent, amt)
-    v.msg = await ix.followup.send(content=opponent.mention, embed=e, view=v)
+    try:
+        if opponent.bot or opponent == ix.user:
+            return await ix.followup.send(embed=discord.Embed(description="\u274c Invalid opponent.", color=C_RED), ephemeral=True)
+        amt = await parse_bet(ix, bet)
+        if not await chk_bet(ix, amt): return
+        ob = await db.bal(ix.guild_id, opponent.id)
+        if amt > ob:
+            return await ix.followup.send(embed=discord.Embed(description=f"\u274c {opponent.mention} doesn't have enough {CE}.", color=C_RED), ephemeral=True)
+        e = discord.Embed(title="\u2694\ufe0f  Duel Challenge", color=C_BLUE)
+        e.description = (f"{ix.user.mention} challenges {opponent.mention}!\n\n"
+                         f"**Bet:** {CE} **{fm(amt)}** each\n"
+                         f"**Winner takes:** {CE} **{fm(amt*2)}**")
+        e.set_footer(text=f"{opponent.display_name} \u2014 you have 60s to respond!")
+        v = DuelView(ix.user, opponent, amt)
+        v.msg = await ix.followup.send(content=opponent.mention, embed=e, view=v)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ROLL
@@ -1364,26 +1530,36 @@ class DepositControlView(View):
 @app_commands.describe(item="What you are depositing")
 async def cmd_deposit(ix: discord.Interaction, item: str):
     await ix.response.defer(ephemeral=True)
-    cat = await get_cat(ix.guild_id, ix.guild)
-    if not cat:
-        return await ix.followup.send(embed=discord.Embed(description="\u274c Category not configured. Ask admin to run /setup.", color=C_RED), ephemeral=True)
-    staff = await get_staff_role(ix.guild_id, ix.guild)
-    num = await db.next_tid(ix.guild_id); tid = f"{num:04d}"
-    ow = {
-        ix.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-        ix.guild.me:           discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
-        ix.user:               discord.PermissionOverwrite(read_messages=True, send_messages=True),
-    }
-    if staff: ow[staff] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-    ch = await cat.create_text_channel(f"deposit-{tid}-{ix.user.name[:15]}", overwrites=ow)
-    view = DepositControlView(ix.user.id, ch)
-    e = discord.Embed(title="\U0001f4e5  Deposit Request", color=C_BLUE)
-    e.set_author(name=ix.user.display_name, icon_url=ix.user.display_avatar.url)
-    e.description = (f"**User:** {ix.user.mention}\n**Depositing:** {item}\n\n"
-                     f"Staff: approve and set the Shillings value.")
-    ping = ix.user.mention + (f" {staff.mention}" if staff else "")
-    await ch.send(content=ping, embed=e, view=view)
-    await ix.followup.send(embed=discord.Embed(description=f"\u2705 Deposit ticket opened \u2014 {ch.mention}", color=C_GREEN), ephemeral=True)
+    try:
+        cat = await get_cat(ix.guild_id, ix.guild)
+        if not cat:
+            return await ix.followup.send(embed=discord.Embed(description="\u274c Category not configured. Ask admin to run /setup.", color=C_RED), ephemeral=True)
+        staff = await get_staff_role(ix.guild_id, ix.guild)
+        num = await db.next_tid(ix.guild_id); tid = f"{num:04d}"
+        ow = {
+            ix.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            ix.guild.me:           discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+            ix.user:               discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        }
+        if staff: ow[staff] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        ch = await cat.create_text_channel(f"deposit-{tid}-{ix.user.name[:15]}", overwrites=ow)
+        view = DepositControlView(ix.user.id, ch)
+        e = discord.Embed(title="\U0001f4e5  Deposit Request", color=C_BLUE)
+        e.set_author(name=ix.user.display_name, icon_url=ix.user.display_avatar.url)
+        e.description = (f"**User:** {ix.user.mention}\n**Depositing:** {item}\n\n"
+                         f"Staff: approve and set the Shillings value.")
+        ping = ix.user.mention + (f" {staff.mention}" if staff else "")
+        await ch.send(content=ping, embed=e, view=view)
+        await ix.followup.send(embed=discord.Embed(description=f"\u2705 Deposit ticket opened \u2014 {ch.mention}", color=C_GREEN), ephemeral=True)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GAMBLE TICKET — with Add User button
@@ -1443,36 +1619,46 @@ class GambleTicketView(View):
 @app_commands.describe(opponent="Your opponent")
 async def cmd_gambleticket(ix: discord.Interaction, opponent: discord.Member):
     await ix.response.defer(ephemeral=True)
-    if opponent.bot or opponent == ix.user:
-        return await ix.followup.send(embed=discord.Embed(description="\u274c Invalid opponent.", color=C_RED), ephemeral=True)
-    cat = await get_cat(ix.guild_id, ix.guild)
-    if not cat:
-        return await ix.followup.send(embed=discord.Embed(description="\u274c Category not configured. Run /setup.", color=C_RED), ephemeral=True)
-    staff = await get_staff_role(ix.guild_id, ix.guild)
-    num = await db.next_tid(ix.guild_id); tid = f"{num:04d}"
-    ow = {
-        ix.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-        ix.guild.me:           discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
-        ix.user:               discord.PermissionOverwrite(read_messages=True, send_messages=True),
-        opponent:              discord.PermissionOverwrite(read_messages=True, send_messages=True),
-    }
-    if staff: ow[staff] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-    ch = await ix.guild.create_text_channel(f"gamble-{tid}", category=cat, overwrites=ow)
-    view = GambleTicketView(ch, staff, ix.user.id)
-    e = discord.Embed(title="\U0001f3b2  Gamble Ticket", color=C_PINK)
-    e.description = (
-        f"**{ix.user.mention}** vs **{opponent.mention}**\n\n"
-        f"**How it works:**\n"
-        f"> 1\ufe0f\u20e3 Both players state what they are wagering\n"
-        f"> 2\ufe0f\u20e3 Staff middleman collects both items\n"
-        f"> 3\ufe0f\u20e3 Use `/roll` or `/coinflip` to decide winner\n"
-        f"> 4\ufe0f\u20e3 Middleman sends everything to the winner\n\n"
-        f"Use **Add User** to add extra players or spectators.\n"
-        f"Staff: use **Close Ticket** when done."
-    )
-    ping = f"{ix.user.mention} {opponent.mention}" + (f" {staff.mention}" if staff else "")
-    await ch.send(content=ping, embed=e, view=view)
-    await ix.followup.send(embed=discord.Embed(description=f"\U0001f3b2 Gamble ticket opened \u2014 {ch.mention}", color=C_PINK), ephemeral=True)
+    try:
+        if opponent.bot or opponent == ix.user:
+            return await ix.followup.send(embed=discord.Embed(description="\u274c Invalid opponent.", color=C_RED), ephemeral=True)
+        cat = await get_cat(ix.guild_id, ix.guild)
+        if not cat:
+            return await ix.followup.send(embed=discord.Embed(description="\u274c Category not configured. Run /setup.", color=C_RED), ephemeral=True)
+        staff = await get_staff_role(ix.guild_id, ix.guild)
+        num = await db.next_tid(ix.guild_id); tid = f"{num:04d}"
+        ow = {
+            ix.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            ix.guild.me:           discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+            ix.user:               discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            opponent:              discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        }
+        if staff: ow[staff] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        ch = await ix.guild.create_text_channel(f"gamble-{tid}", category=cat, overwrites=ow)
+        view = GambleTicketView(ch, staff, ix.user.id)
+        e = discord.Embed(title="\U0001f3b2  Gamble Ticket", color=C_PINK)
+        e.description = (
+            f"**{ix.user.mention}** vs **{opponent.mention}**\n\n"
+            f"**How it works:**\n"
+            f"> 1\ufe0f\u20e3 Both players state what they are wagering\n"
+            f"> 2\ufe0f\u20e3 Staff middleman collects both items\n"
+            f"> 3\ufe0f\u20e3 Use `/roll` or `/coinflip` to decide winner\n"
+            f"> 4\ufe0f\u20e3 Middleman sends everything to the winner\n\n"
+            f"Use **Add User** to add extra players or spectators.\n"
+            f"Staff: use **Close Ticket** when done."
+        )
+        ping = f"{ix.user.mention} {opponent.mention}" + (f" {staff.mention}" if staff else "")
+        await ch.send(content=ping, embed=e, view=view)
+        await ix.followup.send(embed=discord.Embed(description=f"\U0001f3b2 Gamble ticket opened \u2014 {ch.mention}", color=C_PINK), ephemeral=True)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ADMIN COMMANDS
@@ -1483,45 +1669,85 @@ async def cmd_gambleticket(ix: discord.Interaction, opponent: discord.Member):
 @wl_check()
 async def cmd_add(ix: discord.Interaction, member: discord.Member, amount: int):
     await ix.response.defer(ephemeral=True)
-    if amount <= 0:
-        return await ix.followup.send(embed=discord.Embed(description="\u274c Must be positive.", color=C_RED), ephemeral=True)
-    await db.adj(ix.guild_id, member.id, amount)
-    bal = await db.bal(ix.guild_id, member.id)
-    e = discord.Embed(title="\u2705 Shillings Added", color=C_GREEN)
-    e.description = f"**User:** {member.mention}\n**Added:** {CE} **{fm(amount)}**\n**New Balance:** {CE} **{fm(bal)}**"
-    await ix.followup.send(embed=e, ephemeral=True)
+    try:
+        if amount <= 0:
+            return await ix.followup.send(embed=discord.Embed(description="\u274c Must be positive.", color=C_RED), ephemeral=True)
+        await db.adj(ix.guild_id, member.id, amount)
+        bal = await db.bal(ix.guild_id, member.id)
+        e = discord.Embed(title="\u2705 Shillings Added", color=C_GREEN)
+        e.description = f"**User:** {member.mention}\n**Added:** {CE} **{fm(amount)}**\n**New Balance:** {CE} **{fm(bal)}**"
+        await ix.followup.send(embed=e, ephemeral=True)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 @bot.tree.command(name="removeshillings", description="[Staff] Remove Shillings from a user")
 @app_commands.describe(member="Target user", amount="Amount to remove")
 @wl_check()
 async def cmd_remove(ix: discord.Interaction, member: discord.Member, amount: int):
     await ix.response.defer(ephemeral=True)
-    if amount <= 0:
-        return await ix.followup.send(embed=discord.Embed(description="\u274c Must be positive.", color=C_RED), ephemeral=True)
-    await db.adj(ix.guild_id, member.id, -amount)
-    bal = await db.bal(ix.guild_id, member.id)
-    e = discord.Embed(title="\u2705 Shillings Removed", color=C_GREEN)
-    e.description = f"**User:** {member.mention}\n**Removed:** {CE} **{fm(amount)}**\n**New Balance:** {CE} **{fm(bal)}**"
-    await ix.followup.send(embed=e, ephemeral=True)
+    try:
+        if amount <= 0:
+            return await ix.followup.send(embed=discord.Embed(description="\u274c Must be positive.", color=C_RED), ephemeral=True)
+        await db.adj(ix.guild_id, member.id, -amount)
+        bal = await db.bal(ix.guild_id, member.id)
+        e = discord.Embed(title="\u2705 Shillings Removed", color=C_GREEN)
+        e.description = f"**User:** {member.mention}\n**Removed:** {CE} **{fm(amount)}**\n**New Balance:** {CE} **{fm(bal)}**"
+        await ix.followup.send(embed=e, ephemeral=True)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 @bot.tree.command(name="clearbalance", description="[Staff] Reset a user's balance to 0")
 @app_commands.describe(member="Target user")
 @wl_check()
 async def cmd_clear(ix: discord.Interaction, member: discord.Member):
     await ix.response.defer(ephemeral=True)
-    await db.set_bal(ix.guild_id, member.id, 0)
-    await ix.followup.send(embed=discord.Embed(title="\u2705 Balance Cleared",
-        description=f"{member.mention}'s balance reset to 0.", color=C_GREEN), ephemeral=True)
+    try:
+        await db.set_bal(ix.guild_id, member.id, 0)
+        await ix.followup.send(embed=discord.Embed(title="\u2705 Balance Cleared",
+            description=f"{member.mention}'s balance reset to 0.", color=C_GREEN), ephemeral=True)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 @bot.tree.command(name="setwager", description="[Staff] Set a user's wager requirement")
 @app_commands.describe(member="Target user", amount="Amount (0 to clear)")
 @wl_check()
 async def cmd_setwager(ix: discord.Interaction, member: discord.Member, amount: int):
     await ix.response.defer(ephemeral=True)
-    await db.set_wager(ix.guild_id, member.id, amount)
-    desc = (f"{member.mention}'s wager set to {CE} **{fm(amount)}**."
-            if amount > 0 else f"{member.mention}'s wager cleared.")
-    await ix.followup.send(embed=discord.Embed(title="\u2705 Wager Set", description=desc, color=C_GREEN), ephemeral=True)
+    try:
+        await db.set_wager(ix.guild_id, member.id, amount)
+        desc = (f"{member.mention}'s wager set to {CE} **{fm(amount)}**."
+                if amount > 0 else f"{member.mention}'s wager cleared.")
+        await ix.followup.send(embed=discord.Embed(title="\u2705 Wager Set", description=desc, color=C_GREEN), ephemeral=True)
+    except Exception as _cmd_err:
+        log.error(f"/{ix.command.name if ix.command else '?'} error: {_cmd_err}", exc_info=True)
+        _emb = discord.Embed(
+            description=f"\u274c Error: `{type(_cmd_err).__name__}` — please try again.",
+            color=C_RED)
+        try:
+            if ix.response.is_done(): await ix.followup.send(embed=_emb, ephemeral=True)
+            else: await ix.response.send_message(embed=_emb, ephemeral=True)
+        except: pass
 
 @bot.tree.command(name="whitelist", description="[Owner] Add or remove a user from the staff whitelist")
 @app_commands.describe(action="add or remove", member="Target user")
@@ -1534,15 +1760,20 @@ async def cmd_wl(ix: discord.Interaction, action: str, member: discord.Member):
         return await ix.response.send_message(
             embed=discord.Embed(description="\u274c Owner-only command.", color=C_RED), ephemeral=True)
     await ix.response.defer(ephemeral=True)
-    if action == "add":
-        async with db.pool.acquire() as c:
-            await c.execute("INSERT INTO whitelist(guild_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
-                            ix.guild_id, member.id)
-        await ix.followup.send(embed=discord.Embed(description=f"\u2705 {member.mention} added to whitelist.", color=C_GREEN), ephemeral=True)
-    else:
-        async with db.pool.acquire() as c:
-            await c.execute("DELETE FROM whitelist WHERE guild_id=$1 AND user_id=$2", ix.guild_id, member.id)
-        await ix.followup.send(embed=discord.Embed(description=f"\u2705 {member.mention} removed from whitelist.", color=C_GREEN), ephemeral=True)
+    try:
+        if action == "add":
+            async with db.pool.acquire() as c:
+                await c.execute("INSERT INTO whitelist(guild_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
+                                ix.guild_id, member.id)
+            await ix.followup.send(embed=discord.Embed(description=f"\u2705 {member.mention} added to whitelist.", color=C_GREEN), ephemeral=True)
+        else:
+            async with db.pool.acquire() as c:
+                await c.execute("DELETE FROM whitelist WHERE guild_id=$1 AND user_id=$2", ix.guild_id, member.id)
+            await ix.followup.send(embed=discord.Embed(description=f"\u2705 {member.mention} removed from whitelist.", color=C_GREEN), ephemeral=True)
+    except Exception as _cmd_err:
+        log.error(f"/whitelist error: {_cmd_err}", exc_info=True)
+        try: await ix.followup.send(embed=discord.Embed(description="\u274c Error updating whitelist.", color=C_RED), ephemeral=True)
+        except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SETUP & CLOSE
@@ -1559,38 +1790,45 @@ async def cmd_wl(ix: discord.Interaction, action: str, member: discord.Member):
 @wl_check()
 async def cmd_setup(ix: discord.Interaction, setting: str,
                     channel: discord.TextChannel = None, role: discord.Role = None):
-    await ix.response.defer(ephemeral=True); gid = ix.guild_id
-    if setting == "view":
-        c = await db.get_cfg(gid)
-        e = discord.Embed(title="\u2699\ufe0f  Server Config", color=C_BLUE)
-        if c:
-            cat = ix.guild.get_channel(c["cat_id"]) if c.get("cat_id") else None
-            lch = ix.guild.get_channel(c["log_id"]) if c.get("log_id") else None
-            stf = ix.guild.get_role(c["staff_id"])  if c.get("staff_id") else None
-            e.add_field(name="\U0001f4c1 Category", value=cat.mention if cat else "Not set", inline=False)
-            e.add_field(name="\U0001f4cb Logs",     value=lch.mention if lch else "Not set", inline=False)
-            e.add_field(name="\U0001f6e1\ufe0f Staff", value=stf.mention if stf else "Not set", inline=False)
-        else: e.description = "No config found."
-        return await ix.followup.send(embed=e, ephemeral=True)
-    elif setting == "category":
-        if not channel:
-            return await ix.followup.send(embed=discord.Embed(description="\u274c Select a channel.", color=C_RED), ephemeral=True)
-        cid = channel.category_id or channel.id
-        async with db.pool.acquire() as c:
-            await c.execute("INSERT INTO cfg(guild_id,cat_id) VALUES($1,$2) ON CONFLICT(guild_id) DO UPDATE SET cat_id=$2", gid, cid)
-        await ix.followup.send(embed=discord.Embed(description="\u2705 Ticket category set.", color=C_GREEN), ephemeral=True)
-    elif setting == "logs":
-        if not channel:
-            return await ix.followup.send(embed=discord.Embed(description="\u274c Select a channel.", color=C_RED), ephemeral=True)
-        async with db.pool.acquire() as c:
-            await c.execute("INSERT INTO cfg(guild_id,log_id) VALUES($1,$2) ON CONFLICT(guild_id) DO UPDATE SET log_id=$2", gid, channel.id)
-        await ix.followup.send(embed=discord.Embed(description=f"\u2705 Log channel set to {channel.mention}.", color=C_GREEN), ephemeral=True)
-    elif setting == "staff":
-        if not role:
-            return await ix.followup.send(embed=discord.Embed(description="\u274c Select a role.", color=C_RED), ephemeral=True)
-        async with db.pool.acquire() as c:
-            await c.execute("INSERT INTO cfg(guild_id,staff_id) VALUES($1,$2) ON CONFLICT(guild_id) DO UPDATE SET staff_id=$2", gid, role.id)
-        await ix.followup.send(embed=discord.Embed(description=f"\u2705 Staff role set to {role.mention}.", color=C_GREEN), ephemeral=True)
+    await ix.response.defer(ephemeral=True)
+    gid = ix.guild_id
+    try:
+        if setting == "view":
+            c = await db.get_cfg(gid)
+            e = discord.Embed(title="\u2699\ufe0f  Server Config", color=C_BLUE)
+            if c:
+                cat = ix.guild.get_channel(c["cat_id"]) if c.get("cat_id") else None
+                lch = ix.guild.get_channel(c["log_id"]) if c.get("log_id") else None
+                stf = ix.guild.get_role(c["staff_id"])  if c.get("staff_id") else None
+                e.add_field(name="\U0001f4c1 Category", value=cat.mention if cat else "Not set", inline=False)
+                e.add_field(name="\U0001f4cb Logs",     value=lch.mention if lch else "Not set", inline=False)
+                e.add_field(name="\U0001f6e1\ufe0f Staff", value=stf.mention if stf else "Not set", inline=False)
+            else:
+                e.description = "No config found."
+            return await ix.followup.send(embed=e, ephemeral=True)
+        elif setting == "category":
+            if not channel:
+                return await ix.followup.send(embed=discord.Embed(description="\u274c Please select a channel.", color=C_RED), ephemeral=True)
+            cid = channel.category_id or channel.id
+            async with db.pool.acquire() as c:
+                await c.execute("INSERT INTO cfg(guild_id,cat_id) VALUES($1,$2) ON CONFLICT(guild_id) DO UPDATE SET cat_id=$2", gid, cid)
+            await ix.followup.send(embed=discord.Embed(description="\u2705 Ticket category set.", color=C_GREEN), ephemeral=True)
+        elif setting == "logs":
+            if not channel:
+                return await ix.followup.send(embed=discord.Embed(description="\u274c Please select a channel.", color=C_RED), ephemeral=True)
+            async with db.pool.acquire() as c:
+                await c.execute("INSERT INTO cfg(guild_id,log_id) VALUES($1,$2) ON CONFLICT(guild_id) DO UPDATE SET log_id=$2", gid, channel.id)
+            await ix.followup.send(embed=discord.Embed(description=f"\u2705 Log channel set to {channel.mention}.", color=C_GREEN), ephemeral=True)
+        elif setting == "staff":
+            if not role:
+                return await ix.followup.send(embed=discord.Embed(description="\u274c Please select a role.", color=C_RED), ephemeral=True)
+            async with db.pool.acquire() as c:
+                await c.execute("INSERT INTO cfg(guild_id,staff_id) VALUES($1,$2) ON CONFLICT(guild_id) DO UPDATE SET staff_id=$2", gid, role.id)
+            await ix.followup.send(embed=discord.Embed(description=f"\u2705 Staff role set to {role.mention}.", color=C_GREEN), ephemeral=True)
+    except Exception as _cmd_err:
+        log.error(f"/setup error: {_cmd_err}", exc_info=True)
+        try: await ix.followup.send(embed=discord.Embed(description="\u274c Setup failed. Check bot permissions.", color=C_RED), ephemeral=True)
+        except: pass
 
 @bot.tree.command(name="close", description="[Staff] Close a ticket channel")
 @wl_check()
@@ -1740,20 +1978,25 @@ async def on_ready():
 
 @bot.event
 async def on_app_command_error(ix: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.CheckFailure): return
-    # Unwrap CommandInvokeError to get the real cause
+    if isinstance(error, app_commands.CheckFailure):
+        return
+    # Unwrap CommandInvokeError to get the actual exception
     cause = getattr(error, "original", error)
+    log.error(f"App command error [{type(cause).__name__}]: {cause}", exc_info=cause)
     if isinstance(cause, RuntimeError) and "DB_NOT_READY" in str(cause):
-        msg = "\u26a0\ufe0f Bot is still starting up — try again in a moment."
-    elif isinstance(cause, AttributeError) and "NoneType" in str(cause):
-        msg = "\u26a0\ufe0f Bot is still starting up — try again in a moment."
+        msg = "\u26a0\ufe0f The bot is still starting up — please try again in a moment."
     else:
         msg = "\u274c Something went wrong. Please try again."
-    log.error(f"App command error ({type(cause).__name__}): {cause}")
+    emb = discord.Embed(description=msg, color=C_RED)
     try:
-        if ix.response.is_done(): await ix.followup.send(embed=discord.Embed(description=msg, color=C_GOLD), ephemeral=True)
-        else: await ix.response.send_message(embed=discord.Embed(description=msg, color=C_GOLD), ephemeral=True)
-    except: pass
+        if ix.response.is_done():
+            await ix.followup.send(embed=emb, ephemeral=True)
+        else:
+            await ix.response.send_message(embed=emb, ephemeral=True)
+    except discord.NotFound:
+        pass  # interaction token expired
+    except Exception as _send_err:
+        log.warning(f"Could not send error response: {_send_err}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WEB SERVER — Render keep-alive + UptimeRobot
