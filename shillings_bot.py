@@ -66,12 +66,18 @@ class DB:
                 try: await c.execute(sql)
                 except Exception as e: log.warning(f"Schema warning: {e}")
 
+    def _guard(self):
+        if self.pool is None:
+            raise RuntimeError("DB_NOT_READY")
+
     async def bal(self, gid, uid):
+        self._guard()
         async with self.pool.acquire() as c:
             r = await c.fetchrow("SELECT balance FROM eco WHERE guild_id=$1 AND user_id=$2", gid, uid)
         return r["balance"] if r else 0
 
     async def adj(self, gid, uid, amt):
+        self._guard()
         async with self.pool.acquire() as c:
             await c.execute(
                 "INSERT INTO eco(guild_id,user_id,balance) VALUES($1,$2,GREATEST(0,$3)) "
@@ -79,6 +85,7 @@ class DB:
                 gid, uid, amt)
 
     async def set_bal(self, gid, uid, amt):
+        self._guard()
         async with self.pool.acquire() as c:
             await c.execute(
                 "INSERT INTO eco(guild_id,user_id,balance) VALUES($1,$2,GREATEST(0,$3)) "
@@ -86,11 +93,13 @@ class DB:
                 gid, uid, amt)
 
     async def wager_req(self, gid, uid):
+        self._guard()
         async with self.pool.acquire() as c:
             r = await c.fetchrow("SELECT wager_req FROM eco WHERE guild_id=$1 AND user_id=$2", gid, uid)
         return r["wager_req"] if r else 0
 
     async def reduce_wager(self, gid, uid, amt):
+        self._guard()
         async with self.pool.acquire() as c:
             await c.execute(
                 "INSERT INTO eco(guild_id,user_id,wager_req) VALUES($1,$2,0) "
@@ -98,6 +107,7 @@ class DB:
                 gid, uid, amt)
 
     async def add_wager(self, gid, uid, amt):
+        self._guard()
         async with self.pool.acquire() as c:
             await c.execute(
                 "INSERT INTO eco(guild_id,user_id,wager_req) VALUES($1,$2,$3) "
@@ -105,6 +115,7 @@ class DB:
                 gid, uid, amt)
 
     async def set_wager(self, gid, uid, amt):
+        self._guard()
         async with self.pool.acquire() as c:
             await c.execute(
                 "INSERT INTO eco(guild_id,user_id,wager_req) VALUES($1,$2,GREATEST(0,$3)) "
@@ -112,11 +123,13 @@ class DB:
                 gid, uid, amt)
 
     async def last_claim(self, gid, uid):
+        self._guard()
         async with self.pool.acquire() as c:
             r = await c.fetchrow("SELECT last_claim FROM eco WHERE guild_id=$1 AND user_id=$2", gid, uid)
         return r["last_claim"] if r else None
 
     async def touch_claim(self, gid, uid):
+        self._guard()
         async with self.pool.acquire() as c:
             await c.execute(
                 "INSERT INTO eco(guild_id,user_id,last_claim) VALUES($1,$2,NOW()) "
@@ -125,15 +138,18 @@ class DB:
 
     async def is_wl(self, gid, uid):
         if uid == OWNER_ID: return True
+        self._guard()
         async with self.pool.acquire() as c:
             r = await c.fetchrow("SELECT 1 FROM whitelist WHERE guild_id=$1 AND user_id=$2", gid, uid)
         return r is not None
 
     async def get_cfg(self, gid):
+        self._guard()
         async with self.pool.acquire() as c:
             return await c.fetchrow("SELECT * FROM cfg WHERE guild_id=$1", gid)
 
     async def next_tid(self, gid):
+        self._guard()
         async with self.pool.acquire() as c:
             await c.execute(
                 "INSERT INTO ticket_ctr(guild_id,n) VALUES($1,1) "
@@ -250,6 +266,11 @@ def rarity_label(n):
 
 def wl_check():
     async def pred(ix):
+        if db.pool is None:
+            await ix.response.send_message(
+                embed=discord.Embed(description="\u26a0\ufe0f Bot is still starting up, try again in a moment.", color=C_GOLD),
+                ephemeral=True)
+            return False
         ok = await db.is_wl(ix.guild_id, ix.user.id)
         if not ok:
             await ix.response.send_message(
@@ -1199,8 +1220,80 @@ async def cmd_roll(ix: discord.Interaction):
     await ix.response.send_message(embed=e)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DEPOSIT TICKET
+# GAMES MENU
 # ══════════════════════════════════════════════════════════════════════════════
+
+_GAMES_PAGES = [
+    {
+        "title": "\U0001f3ae  Quick Games",
+        "color": C_BLUE,
+        "desc": (
+            "These resolve instantly — no buttons needed.\n\n"
+            f"`/coinflip <bet> <heads|tails>`\n> Correct call pays **2x**\n\n"
+            f"`/slots <bet>`\n> 3 reels, match to win up to **50x**\n\n"
+            f"`/roulette <bet> <red|black|odd|even|1-12|0-36>`\n> Up to **36x** on a single number\n\n"
+            f"`/blackjack <bet>`\n> Beat the dealer — **1.5x** natural, **2x** regular win\n\n"
+            f"`/war <bet>`\n> High card wins **2x** — ties go to sudden death\n\n"
+            f"`/horserace <bet> <horse 1\u20136>`\n> Pick a horse, up to **20x** payout\n\n"
+            f"`/numguess <bet> <1\u2013100>`\n> Exact hit = **90x**, within 3 = **10x**, within 10 = **3x**\n\n"
+            f"`/limbo <bet> <multiplier>`\n> Set your own target — higher = riskier"
+        ),
+    },
+    {
+        "title": "\U0001f579\ufe0f  Interactive Games",
+        "color": C_PINK,
+        "desc": (
+            "These use buttons — you keep playing until you stop or time out.\n\n"
+            f"`/mines <bet> [1|3|5|10 mines]`\n> Click tiles to find gems, avoid bombs. Cash out anytime.\n\n"
+            f"`/crash <bet>`\n> Watch the multiplier rise and cash out before it crashes!\n\n"
+            f"`/higherlower <bet>`\n> Guess the next card, build a streak up to **85x**\n\n"
+            f"`/bomb <bet>`\n> Cut 3 safe wires out of 5, avoid 2 bombs — up to **5x**\n\n"
+            f"`/scratch <bet>`\n> Reveal 9 tiles, match 3 in a row/col/diagonal — up to **50x**\n\n"
+            f"`/duel @user <bet>`\n> PvP — winner takes both bets. Opponent must accept.\n\n"
+            "\u23f1\ufe0f All interactive games have a **60\u2013120 second** timeout."
+        ),
+    },
+]
+
+class GamesView(View):
+    def __init__(self, aid):
+        super().__init__(timeout=120)
+        self.page = 0; self.aid = aid; self.msg = None; self._upd()
+
+    def _upd(self):
+        self.quick_b.disabled  = self.page == 0
+        self.inter_b.disabled  = self.page == 1
+
+    def _embed(self):
+        p = _GAMES_PAGES[self.page]
+        e = discord.Embed(title=p["title"], description=p["desc"], color=p["color"])
+        e.set_footer(text=f"Page {self.page+1}/2  \u00b7  Shillings Bot")
+        return e
+
+    @discord.ui.button(label="\U0001f3ae Quick Games", style=ButtonStyle.blurple, custom_id="gm_quick")
+    async def quick_b(self, ix, _):
+        if ix.user.id != self.aid:
+            return await ix.response.send_message(embed=discord.Embed(description="Not your menu.", color=C_RED), ephemeral=True)
+        self.page = 0; self._upd()
+        await ix.response.edit_message(embed=self._embed(), view=self)
+
+    @discord.ui.button(label="\U0001f579\ufe0f Interactive", style=ButtonStyle.grey, custom_id="gm_inter")
+    async def inter_b(self, ix, _):
+        if ix.user.id != self.aid:
+            return await ix.response.send_message(embed=discord.Embed(description="Not your menu.", color=C_RED), ephemeral=True)
+        self.page = 1; self._upd()
+        await ix.response.edit_message(embed=self._embed(), view=self)
+
+    async def on_timeout(self):
+        for i in self.children: i.disabled = True
+        try: await self.msg.edit(view=self)
+        except: pass
+
+@bot.tree.command(name="games", description="Browse all available games and how to play them")
+async def cmd_games(ix: discord.Interaction):
+    v = GamesView(ix.user.id)
+    await ix.response.send_message(embed=v._embed(), view=v)
+    v.msg = await ix.original_response()
 
 class ApproveModal(Modal, title="Approve Deposit"):
     amount = TextInput(label="Shillings to Award", placeholder="e.g. 500000", required=True)
@@ -1524,24 +1617,8 @@ HELP_PAGES = [
      f"> \U0001f44d Decent \u2014 100K\u20131M\n"
      f"> \u2728 Nice \u2014 1M\u20135M\n"
      f"> \U0001f48e Rare \u2014 5M\u201315M\n"
-     f"> \U0001f31f Jackpot \u2014 15M\u201320M"},
-    {"title": "\U0001f3ae  Quick Games", "color": C_BLUE, "desc":
-     "`/coinflip` \u2014 Heads or tails, 2x\n"
-     "`/slots` \u2014 Spin 3 reels, up to 50x\n"
-     "`/roulette` \u2014 Bet on the wheel, up to 36x\n"
-     "`/blackjack` \u2014 Beat the dealer, 1.5x\u20132x\n"
-     "`/war` \u2014 High card wins, 2x\n"
-     "`/horserace` \u2014 Pick a horse, up to 20x\n"
-     "`/numguess` \u2014 Guess 1\u2013100, exact = 90x\n"
-     "`/limbo` \u2014 Set your own multiplier target"},
-    {"title": "\U0001f3ae  Interactive Games", "color": C_PINK, "desc":
-     "`/mines` \u2014 Avoid bombs, cash out anytime\n"
-     "`/crash` \u2014 Cash out before the crash!\n"
-     "`/higherlower` \u2014 Build a card streak\n"
-     "`/bomb` \u2014 Cut 3 safe wires, avoid 2 bombs\n"
-     "`/scratch` \u2014 Reveal 9 tiles, match 3 in a row\n"
-     "`/duel @user` \u2014 PvP winner-takes-all\n\n"
-     "All interactive games use buttons. 60\u2013120s to play."},
+     f"> \U0001f31f Jackpot \u2014 15M\u201320M\n\n"
+     f"\U0001f3ae Use `/games` to browse all available games!"},
     {"title": "\U0001f3b2  Gamble Tickets", "color": C_PINK, "desc":
      "`/gambleticket @opponent` \u2014 Open a real-item gamble\n\n"
      "**How it works:**\n"
@@ -1664,16 +1741,18 @@ async def on_ready():
 @bot.event
 async def on_app_command_error(ix: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure): return
-    # Unwrap TransformerError / CommandInvokeError to get the real cause
+    # Unwrap CommandInvokeError to get the real cause
     cause = getattr(error, "original", error)
-    if isinstance(cause, AttributeError) and "NoneType" in str(cause) and "acquire" in str(cause):
-        msg = "\u274c Database not connected. Check DATABASE_URL and bot logs."
+    if isinstance(cause, RuntimeError) and "DB_NOT_READY" in str(cause):
+        msg = "\u26a0\ufe0f Bot is still starting up — try again in a moment."
+    elif isinstance(cause, AttributeError) and "NoneType" in str(cause):
+        msg = "\u26a0\ufe0f Bot is still starting up — try again in a moment."
     else:
         msg = "\u274c Something went wrong. Please try again."
     log.error(f"App command error ({type(cause).__name__}): {cause}")
     try:
-        if ix.response.is_done(): await ix.followup.send(embed=discord.Embed(description=msg, color=C_RED), ephemeral=True)
-        else: await ix.response.send_message(embed=discord.Embed(description=msg, color=C_RED), ephemeral=True)
+        if ix.response.is_done(): await ix.followup.send(embed=discord.Embed(description=msg, color=C_GOLD), ephemeral=True)
+        else: await ix.response.send_message(embed=discord.Embed(description=msg, color=C_GOLD), ephemeral=True)
     except: pass
 
 # ══════════════════════════════════════════════════════════════════════════════
