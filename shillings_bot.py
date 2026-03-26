@@ -34,7 +34,11 @@ class DB:
     pool: Optional[asyncpg.Pool] = None
 
     async def connect(self):
+        if self.pool is not None:
+            return  # already connected — don't create a second pool on reconnect
         url = os.getenv("DATABASE_URL", "")
+        if not url:
+            raise RuntimeError("DATABASE_URL is not set!")
         if url.startswith("postgres://"):
             url = "postgresql://" + url[11:]
         self.pool = await asyncpg.create_pool(url, min_size=1, max_size=5, command_timeout=15)
@@ -292,7 +296,7 @@ async def cmd_balance(ix: discord.Interaction, member: discord.Member = None):
     e.set_thumbnail(url=m.display_avatar.url)
     e.add_field(name="\U0001f4b0 Balance", value=f"{CE} **{fm(bal)} {CUR}**", inline=False)
     if wr > 0:
-        pct = min(100, int((1 - wr / max(bal, 1)) * 100))
+        pct = max(0, min(100, int((1 - wr / max(bal, 1)) * 100)))
         bar = "\u2588" * (pct // 10) + "\u2591" * (10 - pct // 10)
         e.add_field(name="\u26a0\ufe0f Wager Requirement",
                     value=f"Must wager {CE} **{fm(wr)}** more\n`{bar}` {pct}%", inline=False)
@@ -474,6 +478,7 @@ class BjView(View):
         for i in self.children: i.disabled = True
         try:
             await db.adj(self.gid, self.uid, -self.bet)
+            await db.reduce_wager(self.gid, self.uid, self.bet)
             await self.msg.edit(embed=discord.Embed(title="\U0001f0cf Blackjack",
                 description="\u23f0 Timed out \u2014 bet lost.", color=C_RED), view=self)
         except: pass
@@ -563,6 +568,7 @@ class CrashView(View):
         if not self.cashed and not self.crashed:
             self.crashed = True
             await db.adj(self.gid, self.uid, -self.bet)
+            await db.reduce_wager(self.gid, self.uid, self.bet)
             for i in self.children: i.disabled = True
             try: await self.msg.edit(embed=discord.Embed(title="\U0001f4c8 Crash",
                 description="\u23f0 Timed out \u2014 bet lost.", color=C_RED), view=self)
@@ -570,14 +576,14 @@ class CrashView(View):
 
 async def _crash_loop(view: CrashView):
     try:
-        while view.cur < view.crash_at and not view.cashed:
+        while view.cur < view.crash_at and not view.cashed and not view.crashed:
             await asyncio.sleep(1.5)
-            if view.cashed: break
+            if view.cashed or view.crashed: break
             view.cur = round(min(view.cur + random.uniform(0.08, 0.18), view.crash_at), 2)
             if view.msg:
                 try: await view.msg.edit(embed=view._embed(), view=view)
                 except: break
-        if not view.cashed:
+        if not view.cashed and not view.crashed:
             view.crashed = True; view.stop()
             for i in view.children: i.disabled = True
             await db.adj(view.gid, view.uid, -view.bet)
@@ -670,7 +676,9 @@ class HLView(View):
 
     async def on_timeout(self):
         if not self.done:
-            self.done = True; await db.adj(self.gid, self.uid, -self.bet)
+            self.done = True
+            await db.adj(self.gid, self.uid, -self.bet)
+            await db.reduce_wager(self.gid, self.uid, self.bet)
             for i in self.children: i.disabled = True
             try: await self.msg.edit(embed=discord.Embed(title="\U0001f0cf Higher or Lower",
                 description="\u23f0 Timed out \u2014 bet lost.", color=C_RED), view=self)
@@ -781,7 +789,9 @@ class MinesView(View):
 
     async def on_timeout(self):
         if not self.done:
-            self.done=True; await db.adj(self.gid, self.uid, -self.bet)
+            self.done=True
+            await db.adj(self.gid, self.uid, -self.bet)
+            await db.reduce_wager(self.gid, self.uid, self.bet)
             for i in self.children: i.disabled = True
             try: await self.msg.edit(embed=discord.Embed(title="\U0001f4a3 Mines",
                 description="\u23f0 Timed out \u2014 bet lost.", color=C_RED), view=self)
@@ -892,7 +902,9 @@ class BombView(View):
 
     async def on_timeout(self):
         if not self.done:
-            self.done=True; await db.adj(self.gid, self.uid, -self.bet)
+            self.done=True
+            await db.adj(self.gid, self.uid, -self.bet)
+            await db.reduce_wager(self.gid, self.uid, self.bet)
             for i in self.children: i.disabled = True
             try: await self.msg.edit(embed=discord.Embed(title="\U0001f4a3 Bomb Defuse",
                 description="\u23f0 Timed out \u2014 bet lost.", color=C_RED), view=self)
@@ -1089,7 +1101,9 @@ class ScratchView(View):
 
     async def on_timeout(self):
         if not self.done:
-            self.done=True; await db.adj(self.gid, self.uid, -self.bet)
+            self.done=True
+            await db.adj(self.gid, self.uid, -self.bet)
+            await db.reduce_wager(self.gid, self.uid, self.bet)
             for i in self.children: i.disabled = True
             try: await self.msg.edit(embed=discord.Embed(title="\U0001f39f\ufe0f Scratch Card",
                 description="\u23f0 Timed out \u2014 bet lost.", color=C_RED), view=self)
@@ -1593,24 +1607,70 @@ async def cmd_help(ix: discord.Interaction):
     v.msg = await ix.original_response()
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SYNC (owner-only utility)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="sync", description="[Owner] Force re-sync slash commands")
+async def cmd_sync(ix: discord.Interaction):
+    if ix.user.id != OWNER_ID:
+        return await ix.response.send_message(
+            embed=discord.Embed(description="\u274c Owner-only command.", color=C_RED), ephemeral=True)
+    await ix.response.defer(ephemeral=True)
+    try:
+        guild_id = int(os.getenv("GUILD_ID", "0"))
+        if guild_id:
+            guild_obj = discord.Object(id=guild_id)
+            bot.tree.copy_global_to(guild=guild_obj)
+            synced = await bot.tree.sync(guild=guild_obj)
+            desc = f"\u2705 Synced **{len(synced)}** commands to this guild (instant)."
+        else:
+            synced = await bot.tree.sync()
+            desc = f"\u2705 Synced **{len(synced)}** commands globally (may take up to 1 hour)."
+        await ix.followup.send(embed=discord.Embed(description=desc, color=C_GREEN), ephemeral=True)
+    except Exception as ex:
+        await ix.followup.send(
+            embed=discord.Embed(description=f"\u274c Sync failed: {ex}", color=C_RED), ephemeral=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
 # EVENTS
 # ══════════════════════════════════════════════════════════════════════════════
 
 @bot.event
 async def on_ready():
-    await db.connect()
+    # Connect DB — wrapped so a DB failure never blocks command sync
     try:
-        synced = await bot.tree.sync()
-        log.info(f"Synced {len(synced)} slash commands")
+        await db.connect()
+    except Exception as ex:
+        log.error(f"DB connect failed: {ex}  — bot will run without database until fixed!")
+
+    # Sync slash commands.
+    # Set GUILD_ID env var for instant guild-specific sync (great for testing).
+    # Leave it unset for global sync (takes up to 1 hour to propagate on Discord's side).
+    try:
+        guild_id = int(os.getenv("GUILD_ID", "0"))
+        if guild_id:
+            guild_obj = discord.Object(id=guild_id)
+            bot.tree.copy_global_to(guild=guild_obj)
+            synced = await bot.tree.sync(guild=guild_obj)
+            log.info(f"Synced {len(synced)} slash commands to guild {guild_id}")
+        else:
+            synced = await bot.tree.sync()
+            log.info(f"Synced {len(synced)} slash commands globally")
     except Exception as ex:
         log.error(f"Slash sync failed: {ex}")
+
     log.info(f"Online as {bot.user} (ID: {bot.user.id})")
 
 @bot.event
 async def on_app_command_error(ix: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure): return
-    msg = "\u274c Something went wrong. Please try again."
-    log.error(f"App command error: {error}")
+    # Unwrap TransformerError / CommandInvokeError to get the real cause
+    cause = getattr(error, "original", error)
+    if isinstance(cause, AttributeError) and "NoneType" in str(cause) and "acquire" in str(cause):
+        msg = "\u274c Database not connected. Check DATABASE_URL and bot logs."
+    else:
+        msg = "\u274c Something went wrong. Please try again."
+    log.error(f"App command error ({type(cause).__name__}): {cause}")
     try:
         if ix.response.is_done(): await ix.followup.send(embed=discord.Embed(description=msg, color=C_RED), ephemeral=True)
         else: await ix.response.send_message(embed=discord.Embed(description=msg, color=C_RED), ephemeral=True)
