@@ -256,7 +256,7 @@ def fmt(n: int) -> str:
 def fmt_bal(n: int) -> str:
     return f"{SHILLING} **{fmt(n)}**"
 
-def parse_bet(s: str, bal: int) -> int | None:
+def parse_bet(s: str, bal: int):
     s = s.lower().strip()
     if s in ("all","allin","max"): return bal
     if s == "half": return bal // 2
@@ -306,7 +306,20 @@ async def owner_guard(interaction: discord.Interaction) -> bool:
         embed=discord.Embed(description="❌ Owner only.", color=C_RED), ephemeral=True)
     return False
 
+async def db_ready(interaction: discord.Interaction) -> bool:
+    """Check DB is connected before any command that needs it."""
+    if DB.pool is None:
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                title="⚠️ Bot Starting Up",
+                description="The database is still connecting. Please wait 10 seconds and try again.",
+                color=C_ORANGE),
+            ephemeral=True)
+        return False
+    return True
+
 async def get_bet(interaction: discord.Interaction, bet_str: str):
+    if not await db_ready(interaction): return None
     uid = interaction.user.id
     await DB.ensure(uid, str(interaction.user))
     bal = await DB.bal(uid)
@@ -337,10 +350,37 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
 @bot.event
 async def on_ready():
-    await DB.connect()
-    await bot.tree.sync()
-    print(f"✅  {bot.user} online — {len(bot.guilds)} guild(s)")
+    print(f"🔄 Logged in as {bot.user} — connecting to DB...")
+    try:
+        await DB.connect()
+        print("✅ Database connected and tables ready.")
+    except Exception as e:
+        print(f"❌ DATABASE CONNECTION FAILED: {e}")
+        return  # Can't proceed without DB
+
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Synced {len(synced)} slash commands.")
+    except Exception as e:
+        print(f"❌ FAILED TO SYNC COMMANDS: {e}")
+
+    print(f"✅ {bot.user} is online in {len(bot.guilds)} guild(s)!")
     asyncio.create_task(_keep_alive())
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Global slash command error handler — shows errors in Discord instead of silently failing."""
+    msg = f"❌ Something went wrong: `{error}`"
+    if isinstance(error, app_commands.CommandInvokeError):
+        msg = f"❌ Error: `{error.original}`"
+        print(f"[CMD ERROR] /{interaction.command.name if interaction.command else '?'}: {error.original}")
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception:
+        pass
 
 async def _keep_alive():
     import aiohttp
@@ -361,6 +401,7 @@ async def _keep_alive():
 # ── /daily ───────────────────────────────────────────────
 @bot.tree.command(name="daily", description="Claim your daily Shillings every 3 hours")
 async def cmd_daily(interaction: discord.Interaction):
+    if not await db_ready(interaction): return
     uid = interaction.user.id
     await DB.ensure(uid, str(interaction.user))
     now = int(time.time())
@@ -396,6 +437,7 @@ async def cmd_daily(interaction: discord.Interaction):
 @bot.tree.command(name="balance", description="Check your balance or someone else's")
 @app_commands.describe(user="User to check (defaults to you)")
 async def cmd_balance(interaction: discord.Interaction, user: discord.Member = None):
+    if not await db_ready(interaction): return
     target = user or interaction.user
     await DB.ensure(target.id, str(target))
     row = await DB.get(target.id)
@@ -421,6 +463,7 @@ async def cmd_balance(interaction: discord.Interaction, user: discord.Member = N
 # ── /leaderboard ─────────────────────────────────────────
 @bot.tree.command(name="leaderboard", description="Top 10 richest players")
 async def cmd_lb(interaction: discord.Interaction):
+    if not await db_ready(interaction): return
     rows = await DB.leaderboard(10)
     if not rows:
         return await interaction.response.send_message("No data yet.", ephemeral=True)
@@ -1455,6 +1498,7 @@ class AddUserModal(discord.ui.Modal, title="Add User to Ticket"):
 @bot.tree.command(name="gambleticket", description="Open a private gamble room with an opponent (staff middleman)")
 @app_commands.describe(opponent="The other player")
 async def cmd_gambleticket(interaction: discord.Interaction, opponent: discord.Member):
+    if not await db_ready(interaction): return
     if not await is_staff(interaction.user.id):
         return await interaction.response.send_message("❌ Staff only.", ephemeral=True)
     if opponent.bot or opponent.id == interaction.user.id:
@@ -1500,6 +1544,7 @@ async def cmd_gambleticket(interaction: discord.Interaction, opponent: discord.M
 @bot.tree.command(name="payout", description="Staff: award coins to the winner of a gamble ticket")
 @app_commands.describe(user="Winner", amount="Amount to give")
 async def cmd_payout(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not await db_ready(interaction): return
     if not await is_staff(interaction.user.id):
         return await interaction.response.send_message("❌ Staff only.", ephemeral=True)
     if amount <= 0:
@@ -1520,6 +1565,7 @@ async def cmd_payout(interaction: discord.Interaction, user: discord.Member, amo
 @bot.tree.command(name="deposit", description="Open a deposit ticket to trade real items for Shillings")
 @app_commands.describe(item="Describe what you're depositing")
 async def cmd_deposit(interaction: discord.Interaction, item: str):
+    if not await db_ready(interaction): return
     guild = interaction.guild
     cat = discord.utils.get(guild.categories, name="📥 Deposits")
     if not cat:
@@ -1598,6 +1644,7 @@ class DepositApproveModal(discord.ui.Modal, title="Approve Deposit"):
 @bot.tree.command(name="depositshillings", description="Staff: give Shillings to a user with a wager requirement")
 @app_commands.describe(user="Who to give Shillings to", amount="Amount to deposit")
 async def cmd_deposit_shillings(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not await db_ready(interaction): return
     if not await staff_guard(interaction): return
     if amount <= 0:
         return await interaction.response.send_message("❌ Amount must be positive.", ephemeral=True)
@@ -1622,6 +1669,7 @@ async def cmd_deposit_shillings(interaction: discord.Interaction, user: discord.
 @bot.tree.command(name="addshillings", description="Staff: add Shillings to a user")
 @app_commands.describe(user="Target user", amount="Amount to add")
 async def cmd_addshillings(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not await db_ready(interaction): return
     if not await staff_guard(interaction): return
     if amount <= 0: return await interaction.response.send_message("❌ Must be positive.", ephemeral=True)
     await DB.ensure(user.id, str(user))
@@ -1640,6 +1688,7 @@ async def cmd_addshillings(interaction: discord.Interaction, user: discord.Membe
 @bot.tree.command(name="removeshillings", description="Staff: remove Shillings from a user")
 @app_commands.describe(user="Target user", amount="Amount to remove")
 async def cmd_removeshillings(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not await db_ready(interaction): return
     if not await staff_guard(interaction): return
     if amount <= 0: return await interaction.response.send_message("❌ Must be positive.", ephemeral=True)
     await DB.ensure(user.id, str(user))
@@ -1658,6 +1707,7 @@ async def cmd_removeshillings(interaction: discord.Interaction, user: discord.Me
 @bot.tree.command(name="clearbalance", description="Staff: reset a user's balance to 0")
 @app_commands.describe(user="Target user")
 async def cmd_clearbalance(interaction: discord.Interaction, user: discord.Member):
+    if not await db_ready(interaction): return
     if not await staff_guard(interaction): return
     await DB.ensure(user.id, str(user))
     await DB.clear_balance(user.id)
@@ -1671,6 +1721,7 @@ async def cmd_clearbalance(interaction: discord.Interaction, user: discord.Membe
 @bot.tree.command(name="setwager", description="Staff: manually set or clear a user's wager requirement")
 @app_commands.describe(user="Target user", amount="0 to clear")
 async def cmd_setwager(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not await db_ready(interaction): return
     if not await staff_guard(interaction): return
     await DB.ensure(user.id, str(user))
     await DB.set_wager(user.id, max(0, amount))
@@ -1684,6 +1735,7 @@ async def cmd_setwager(interaction: discord.Interaction, user: discord.Member, a
 @bot.tree.command(name="setlogs", description="Owner/Staff: set the channel for transaction logs")
 @app_commands.describe(channel="Channel to send logs to")
 async def cmd_setlogs(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not await db_ready(interaction): return
     if not await staff_guard(interaction): return
     await DB.set_log_channel(interaction.guild.id, channel.id)
     e = discord.Embed(title="📋  Log Channel Set", color=C_BLUE,
@@ -1698,6 +1750,7 @@ async def cmd_setlogs(interaction: discord.Interaction, channel: discord.TextCha
     app_commands.Choice(name="list",   value="list"),
 ])
 async def cmd_whitelist(interaction: discord.Interaction, action: str, user: discord.Member = None):
+    if not await db_ready(interaction): return
     if not await owner_guard(interaction): return
     if action == "list":
         rows = await DB.wl_list()
