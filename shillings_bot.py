@@ -48,7 +48,14 @@ class DB:
 
     @classmethod
     async def connect(cls):
-        cls.pool = await asyncpg.create_pool(os.environ["DATABASE_URL"], ssl="require")
+        import ssl as _ssl
+        url = os.environ["DATABASE_URL"]
+        # Render appends ?sslmode=require — strip it so asyncpg doesn't get confused
+        url = url.replace("?sslmode=require", "").replace("&sslmode=require", "")
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        cls.pool = await asyncpg.create_pool(url, ssl=ctx, min_size=1, max_size=5)
         await cls.init_tables()
 
     @classmethod
