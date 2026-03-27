@@ -541,6 +541,9 @@ async def cmd_slots(interaction: discord.Interaction, bet: str):
     uid = interaction.user.id
     await interaction.response.defer()
 
+    # Deduct bet upfront
+    await DB.remove_raw(uid, amount)
+
     reels = random.choices(SLOT_SYMS, weights=SLOT_W, k=3)
     jackpot = reels[0] == reels[1] == reels[2]
     two     = not jackpot and (reels[0]==reels[1] or reels[1]==reels[2])
@@ -549,16 +552,16 @@ async def cmd_slots(interaction: discord.Interaction, bet: str):
         multiplier = SLOT_PAY.get(reels[0], 3)
         payout = amount * multiplier
         net = payout - amount
-        await DB.update_bal(uid, net)
+        await DB.add_raw(uid, payout)          # return full payout
         result = f"🎉 **JACKPOT! {multiplier}x**"
         color = C_GOLD
     elif two:
         net = 0
+        await DB.add_raw(uid, amount)           # return stake (push)
         result = "✨ **Two of a kind — push!**"
         color = C_BLUE
     else:
         net = -amount
-        await DB.update_bal(uid, -amount)
         result = "😞 No match"
         color = C_RED
 
@@ -639,23 +642,27 @@ class BJView(discord.ui.View):
 
         pv, dv = hand_total(player), hand_total(dealer)
 
-        if reason == "bust":
+        # Bet was already deducted when game started (and doubled if doubled).
+        # So we only need to ADD back winnings — never deduct again.
+        if reason == "bust" or pv > 21:
             net = -bet; outcome = "💥 Bust! You lost."
-        elif reason == "bj" and len(player)==2 and pv==21:
-            payout = int(bet * 1.5); net = payout
-            outcome = f"🃏 Blackjack! +1.5x"
-            await DB.update_bal(self.uid, payout)
-        elif pv > 21:
-            net = -bet; outcome = "💥 Bust!"
+            # nothing to add — bet already gone
+        elif reason == "bj" and len(player) == 2 and pv == 21:
+            bonus = int(bet * 0.5)
+            net = bet + bonus
+            outcome = "🃏 Blackjack! 1.5x payout!"
+            await DB.add_raw(self.uid, bet + bonus)   # return stake + 50% bonus
         elif dv > 21 or pv > dv:
-            net = bet; await DB.update_bal(self.uid, bet); outcome = "🎉 You win!"
+            net = bet
+            await DB.add_raw(self.uid, bet * 2)       # return stake + equal profit
+            outcome = "🎉 You win!"
         elif pv == dv:
-            net = 0; await DB.update_bal(self.uid, bet - (bet if doubled else 0)); outcome = "🤝 Push — returned."
-            # re-add the bet since it was already deducted
-            await DB.add_raw(self.uid, bet)
             net = 0
+            await DB.add_raw(self.uid, bet)            # return stake only
+            outcome = "🤝 Push — bet returned."
         else:
             net = -bet; outcome = "😞 Dealer wins."
+            # nothing to add — bet already gone
 
         await DB.inc_games(self.uid)
         bal = await DB.bal(self.uid)
@@ -710,7 +717,9 @@ class BJView(discord.ui.View):
         await self.end_game(interaction, "stand")
 
     async def on_timeout(self):
-        active_bj.pop(self.uid, None)
+        game = active_bj.pop(self.uid, None)
+        if game:
+            await DB.add_raw(self.uid, game["bet"])  # refund on timeout
 
 @bot.tree.command(name="blackjack", description="Classic blackjack vs the dealer")
 @app_commands.describe(bet="Amount to bet")
@@ -826,7 +835,7 @@ async def cmd_crash(interaction: discord.Interaction, bet: str):
         m = view.cashout_multi
         payout = int(amount * m)
         net = payout - amount
-        await DB.update_bal(uid, payout)
+        await DB.add_raw(uid, payout)          # return stake + profit (bet already deducted)
         color = C_GREEN
         result = f"✅ Cashed out at **{m:.2f}x** — +{fmt(net)}"
     else:
@@ -852,8 +861,13 @@ active_hl = {}  # uid -> {bet, card, streak, total_payout}
 
 class HLView(discord.ui.View):
     def __init__(self, uid):
-        super().__init__(timeout=30)
+        super().__init__(timeout=60)
         self.uid = uid
+
+    async def on_timeout(self):
+        game = active_hl.pop(self.uid, None)
+        if game:
+            await DB.add_raw(self.uid, game["bet"])  # refund on timeout
 
     async def resolve(self, interaction, choice):
         if interaction.user.id != self.uid: return await interaction.response.defer()
@@ -879,7 +893,7 @@ class HLView(discord.ui.View):
         else:
             active_hl.pop(self.uid, None)
             bet = game["bet"]
-            await DB.update_bal(self.uid, -bet)
+            # bet already deducted at game start — nothing more to remove
             await DB.inc_games(self.uid)
             bal = await DB.bal(self.uid)
             for item in self.children: item.disabled = True
@@ -905,7 +919,7 @@ class HLView(discord.ui.View):
         bet = game["bet"]
         payout = int(bet * game["total_payout"])
         net = payout - bet
-        await DB.update_bal(self.uid, net)
+        await DB.add_raw(self.uid, payout)     # return stake + profit (bet already deducted)
         await DB.inc_games(self.uid)
         bal = await DB.bal(self.uid)
         for item in self.children: item.disabled = True
@@ -926,6 +940,7 @@ async def cmd_hl(interaction: discord.Interaction, bet: str):
         return await interaction.response.send_message("❌ Already in a game!", ephemeral=True)
     amount = await get_bet(interaction, bet)
     if amount is None: return
+    await DB.remove_raw(uid, amount)           # deduct bet upfront
     card = (random.choice(RANKS), random.choice(SUITS))
     active_hl[uid] = {"bet": amount, "card": card, "streak": 0, "total_payout": 1.0}
     view = HLView(uid)
@@ -1069,6 +1084,7 @@ async def cmd_mines(interaction: discord.Interaction, bet: str, mines: int = 3):
         return await interaction.response.send_message("❌ Already in a game!", ephemeral=True)
     amount = await get_bet(interaction, bet)
     if amount is None: return
+    await DB.remove_raw(uid, amount)           # deduct bet upfront
     grid = ["💣"]*mines + ["💎"]*(16-mines)
     random.shuffle(grid)
     active_mines[uid] = {"bet": amount, "grid": grid, "revealed": set(), "mine_count": mines}
@@ -2301,6 +2317,35 @@ class HelpView(discord.ui.View):
 async def cmd_help(interaction: discord.Interaction):
     view = HelpView(interaction.user.id, page=0)
     await interaction.response.send_message(embed=build_help_embed(0), view=view)
+
+# ═══════════════════════════════════════════════════════════
+#  KEEP-ALIVE WEB SERVER (required for Render Web Service)
+#  Binds to PORT env var (Render sets this automatically).
+#  UptimeRobot can ping it to prevent sleeping.
+# ═══════════════════════════════════════════════════════════
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class _PingHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Shillings Casino is alive!")
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+    def log_message(self, *args):
+        pass  # silence access logs
+
+def _start_webserver():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), _PingHandler)
+    server.serve_forever()
+
+threading.Thread(target=_start_webserver, daemon=True).start()
+print("🌐 Web server started")
 
 # ═══════════════════════════════════════════════════════════
 #  RUN
